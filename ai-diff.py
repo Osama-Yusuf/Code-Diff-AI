@@ -28,16 +28,16 @@ def run_git(args, repo=None, allow_fail=False):
             return e.output.decode("utf-8", errors="replace")
         raise RuntimeError(f"git {' '.join(shlex.quote(a) for a in args)} failed:\n{e.output.decode()}")
 
-def http_get(url, accept=None, token=None):
-    headers = {}
+def http_get(url, accept=None, token=None, timeout=20):
+    headers = {"User-Agent": "ai-diff/1.0"}
     if accept:
         headers["Accept"] = accept
-    # Support both old and new header keys for GitHub tokens
+    # Prefer Bearer to support classic and fine-grained tokens
     if token:
-        headers["Authorization"] = f"token {token}"
+        headers["Authorization"] = f"Bearer {token}"
     req = Request(url, headers=headers)
     try:
-        with urlopen(req) as resp:
+        with urlopen(req, timeout=timeout) as resp:
             return resp.read()
     except HTTPError as e:
         msg = e.read().decode(errors="replace")
@@ -174,19 +174,27 @@ def fetch_pr_bundle(owner, repo, number, token=None):
     deletions = meta.get("deletions")
     changed = meta.get("changed_files")
     title = meta.get("title") or f"PR #{number}"
-    # Commits list
-    commits_bytes = http_get(f"{API_BASE}/repos/{owner}/{repo}/pulls/{number}/commits", accept="application/vnd.github+json", token=token)
-    commits_json = json.loads(commits_bytes.decode("utf-8", errors="replace"))
+    # Commits list with pagination (per_page=100)
     commits_md = []
-    for c in commits_json:
-        sha = c.get("sha", "")[:7]
-        commit = c.get("commit", {})
-        msg = (commit.get("message") or "").splitlines()[0]
-        author = (commit.get("author") or {}).get("name") or ""
-        date = (commit.get("author") or {}).get("date") or ""
-        if date:
-            date = date.split("T")[0]
-        commits_md.append(f"- {sha} {date} {author} — {msg}")
+    page = 1
+    while True:
+        commits_url = f"{API_BASE}/repos/{owner}/{repo}/pulls/{number}/commits?per_page=100&page={page}"
+        commits_bytes = http_get(commits_url, accept="application/vnd.github+json", token=token)
+        page_items = json.loads(commits_bytes.decode("utf-8", errors="replace"))
+        if not page_items:
+            break
+        for c in page_items:
+            sha = c.get("sha", "")[:7]
+            commit = c.get("commit", {})
+            msg = (commit.get("message") or "").splitlines()[0]
+            author = (commit.get("author") or {}).get("name") or ""
+            date = (commit.get("author") or {}).get("date") or ""
+            if date:
+                date = date.split("T")[0]
+            commits_md.append(f"- {sha} {date} {author} — {msg}")
+        if len(page_items) < 100:
+            break
+        page += 1
     commits_md = "\n".join(commits_md)
     # Diff
     diff_bytes = http_get(f"{API_BASE}/repos/{owner}/{repo}/pulls/{number}", accept="application/vnd.github.v3.diff", token=token)
