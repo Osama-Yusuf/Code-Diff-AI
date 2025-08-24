@@ -342,8 +342,15 @@ def main():
             output_path = f"./diff-commit-{short}.md"
     elif mode == "range":
         rng = details["range"]
-        diff_text = local_diff(args.repo, *rng.split("..", 1), args.context, args.word_diff) if ".." in rng and "..." not in rng \
-                    else local_diff(args.repo, rng.split("...")[0], rng.split("...")[1], args.context, args.word_diff)
+        if "..." in rng:
+            cmd = ["diff", f"-U{args.context}", "--find-renames"]
+            if args.word_diff:
+                cmd.append("--word-diff=plain")
+            cmd.append(rng)
+            diff_text = run_git(cmd, repo=args.repo, allow_fail=True)
+        else:
+            a, b = rng.split("..", 1)
+            diff_text = local_diff(args.repo, a, b, args.context, args.word_diff)
         title = f"Range {rng}"
         # shortstat needs the range as-is (without -U)
         summary = git_shortstat(args.repo, None, None, [])  # fallback if next line fails
