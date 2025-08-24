@@ -109,9 +109,22 @@ def build_markdown(title, repo_name, target_label, summary, diff_text, commits_m
     parts.append("\n## Summary of Changes\n")
     parts.append(summary + "\n")
     parts.append("\n## Diffs\n")
-    parts.append("```diff\n")
-    parts.append(diff_text.rstrip() + "\n")
-    parts.append("```\n")
+
+    # Break the unified diff into per-file sections
+    per_files = split_diff_by_file(diff_text)
+    if not per_files:
+        # fallback: single block
+        parts.append("```diff\n")
+        parts.append(diff_text.rstrip() + "\n")
+        parts.append("```\n")
+    else:
+        for filename, content in per_files:
+            parts.append("diff\n")
+            parts.append(f"{filename}\n")
+            parts.append("```diff\n")
+            parts.append(content.rstrip() + "\n")
+            parts.append("```\n\n")
+
     if truncated_note:
         parts.append(f"\n> {truncated_note}\n")
     if prompt:
@@ -127,6 +140,63 @@ def build_markdown(title, repo_name, target_label, summary, diff_text, commits_m
         Lastly suggest a few features that could be added to the code or the project.
         """).lstrip())
     return "".join(parts)
+
+def split_diff_by_file(diff_text):
+    """
+    Split a unified diff into per-file chunks.
+    Returns list of tuples: (filename, chunk_text)
+    """
+    lines = diff_text.splitlines()
+    files = []
+    current = []
+    current_header = None
+    for line in lines:
+        if line.startswith("diff --git "):
+            if current:
+                files.append((infer_filename(current_header, current), "\n".join(current)))
+                current = []
+            current_header = line
+            continue
+        if current_header is not None:
+            current.append(line)
+        else:
+            # preamble before first diff --git; collect anyway
+            current.append(line)
+    if current:
+        files.append((infer_filename(current_header, current), "\n".join(current)))
+    return files
+
+def infer_filename(header_line, chunk_lines):
+    """Infer filename from diff chunk lines."""
+    # Prefer +++ line (new file path), fallback to --- line, then diff header
+    filename = None
+    for ln in chunk_lines:
+        if ln.startswith("+++ "):
+            path = ln[4:].strip()
+            if path != "/dev/null":
+                filename = strip_prefix(path)
+                break
+    if not filename:
+        for ln in chunk_lines:
+            if ln.startswith("--- "):
+                path = ln[4:].strip()
+                if path != "/dev/null":
+                    filename = strip_prefix(path)
+                    break
+    if not filename and header_line and header_line.startswith("diff --git "):
+        try:
+            parts = header_line.split()
+            # format: diff --git a/path b/path
+            if len(parts) >= 4:
+                filename = strip_prefix(parts[3])
+        except Exception:
+            filename = "(unknown file)"
+    return filename or "(unknown file)"
+
+def strip_prefix(path):
+    if path.startswith("a/") or path.startswith("b/"):
+        return path[2:]
+    return path
 
 def truncate_text(text, max_lines):
     lines = text.splitlines()
