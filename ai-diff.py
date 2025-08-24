@@ -19,14 +19,18 @@ API_BASE = "https://api.github.com"
 
 def run_git(args, repo=None, allow_fail=False):
     env = os.environ.copy()
+    env["LC_ALL"] = "C"
     cmd = ["git", "-c", "core.quotepath=false", "-c", "color.ui=never"] + args
     try:
-        out = subprocess.check_output(cmd, cwd=repo, stderr=subprocess.STDOUT)
+        out = subprocess.check_output(cmd, cwd=repo, stderr=subprocess.STDOUT, env=env)
         return out.decode("utf-8", errors="replace")
     except subprocess.CalledProcessError as e:
         if allow_fail:
             return e.output.decode("utf-8", errors="replace")
-        raise RuntimeError(f"git {' '.join(shlex.quote(a) for a in args)} failed:\n{e.output.decode()}")
+        raise RuntimeError(
+            f"git {' '.join(shlex.quote(a) for a in args)} failed:\n"
+            f"{e.output.decode('utf-8', errors='replace')}"
+        )
 
 def http_get(url, accept=None, token=None, timeout=20):
     headers = {"User-Agent": "ai-diff/1.0"}
@@ -230,12 +234,6 @@ def unstaged_diff(repo, context, word_diff):
         args.append("--word-diff=plain")
     return run_git(args, repo=repo, allow_fail=True)
 
-def parse_github_repo_from_url(url):
-    m = re.match(r"https?://github\.com/([^/]+)/([^/]+)", url)
-    if not m:
-        raise ValueError(f"Not a GitHub URL: {url}")
-    return m.group(1), re.sub(r"\.git$", "", m.group(2))
-
 def fetch_pr_bundle(owner, repo, number, token=None):
     # Metadata: additions, deletions, changed_files
     meta_bytes = http_get(f"{API_BASE}/repos/{owner}/{repo}/pulls/{number}", accept="application/vnd.github+json", token=token)
@@ -293,15 +291,92 @@ def fetch_commit_bundle(owner, repo, sha, token=None):
     return title, summary, diff_text, commits_md
 
 def main():
-    p = argparse.ArgumentParser(description="Generate a single Markdown file for AI code review from PR/commit/range/worktree.")
-    p.add_argument("target", help="PR URL | commit URL | commit-ish | range (A..B or A...B) | WORKTREE | UNSTAGED")
-    p.add_argument("-r", "--repo", default=".", help="Local repo path (default: current dir). Required for local ranges/commits/WORKTREE.")
-    p.add_argument("-o", "--output", default=None, help="Output Markdown file (default: auto-named per target)")
-    p.add_argument("-c", "--context", type=int, default=3, help="Diff context lines (default: 3)")
-    p.add_argument("-w", "--word-diff", action="store_true", help="Use git --word-diff=plain for local diffs")
-    p.add_argument("--max-lines", type=int, default=5000, help="Truncate diff after N lines (default: 5000)")
-    p.add_argument("--token", default=os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN"), help="GitHub token for private repos/APIs (default: $GITHUB_TOKEN or $GH_TOKEN)")
-    p.add_argument("--no-prompt", action="store_true", help="Omit the helper prompt section")
+    p = argparse.ArgumentParser(
+        description=(
+            "Generate a single Markdown file for AI code review from PR/commit/range/worktree.\n\n"
+            "Targets: PR URL | commit URL | commit-ish | range (A..B or A...B) | WORKTREE | UNSTAGED"
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=textwrap.dedent(
+            """
+            Examples:
+              # PR URL (GitHub)
+              ai-diff.py https://github.com/owner/repo/pull/123 --token "$GITHUB_TOKEN"
+
+              # Commit URL (GitHub)
+              ai-diff.py https://github.com/owner/repo/commit/abc1234 --no-prompt
+
+              # Local commit-ish (compare commit to its parent)
+              ai-diff.py abc1234 -r /path/to/repo
+
+              # Two-dot range (A..B)
+              ai-diff.py main..feature -r . -c 10
+
+              # Three-dot range (A...B) — compared to merge base
+              ai-diff.py main...feature -r . -w
+
+              # Working tree vs HEAD (staged + unstaged)
+              ai-diff.py WORKTREE -r . --max-lines 2000
+
+              # Only unstaged changes (working tree vs index)
+              ai-diff.py UNSTAGED -r . -o review-unstaged.md
+
+              # Private repos — use a token (or env vars GITHUB_TOKEN/GH_TOKEN)
+              ai-diff.py https://github.com/owner/repo/pull/999 --token "$GITHUB_TOKEN"
+            """
+        ),
+    )
+    p.add_argument(
+        "target",
+        help=(
+            "PR URL | commit URL | commit-ish | range (A..B or A...B) | WORKTREE | UNSTAGED\n"
+            "e.g. https://github.com/owner/repo/pull/123 | abc1234 | main...feature | WORKTREE"
+        ),
+    )
+    p.add_argument(
+        "-r",
+        "--repo",
+        default=".",
+        help="Local repo path (default: .). Needed for local commits/ranges/WORKTREE/UNSTAGED. e.g. -r /path/to/repo",
+    )
+    p.add_argument(
+        "-o",
+        "--output",
+        default=None,
+        help="Output Markdown file (default: auto-named). e.g. -o review.md",
+    )
+    p.add_argument(
+        "-c",
+        "--context",
+        type=int,
+        default=3,
+        help="Diff context lines (default: 3). e.g. -c 10",
+    )
+    p.add_argument(
+        "-w",
+        "--word-diff",
+        action="store_true",
+        help="Use git --word-diff=plain for local diffs. e.g. -w",
+    )
+    p.add_argument(
+        "--max-lines",
+        type=int,
+        default=5000,
+        help="Truncate diff after N lines (default: 5000). e.g. --max-lines 2000",
+    )
+    p.add_argument(
+        "--token",
+        default=os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN"),
+        help=(
+            "GitHub token for private repos/APIs. Prefers Authorization: Bearer. "
+            "Defaults to $GITHUB_TOKEN or $GH_TOKEN. e.g. --token $GITHUB_TOKEN"
+        ),
+    )
+    p.add_argument(
+        "--no-prompt",
+        action="store_true",
+        help="Omit the helper prompt section at the end of the Markdown.",
+    )
     args = p.parse_args()
 
     mode, details = detect_mode(args.target)
